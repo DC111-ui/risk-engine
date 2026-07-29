@@ -1,0 +1,523 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  Fraud Detection & Transaction Risk Engine — Phase 2
+  Lambda + API Gateway + DynamoDB + EventBridge infrastructure.
+  Portfolio project: darlingtonchanakira.com
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+    AllowedValues: [prod, staging, dev]
+
+  ProjectName:
+    Type: String
+    Default: fraud-risk-engine
+
+  CorsAllowOrigin:
+    Type: String
+    Default: "*"
+    Description: >
+      CORS origin. Change to "https://darlingtonchanakira.com" once the frontend is live.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 30
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Tracing: Active
+    Environment:
+      Variables:
+        DYNAMODB_TABLE_NAME: !Ref FraudTransactionsTable
+        STAGE: !Ref Stage
+        CORS_ALLOW_ORIGIN: !Ref CorsAllowOrigin
+        NODE_OPTIONS: "--enable-source-maps"
+    Tags:
+      Project: !Ref ProjectName
+      Stage: !Ref Stage
+      Owner: darlington-chanakira
+
+Resources:
+
+  # ── DynamoDB Table ──────────────────────────────────────────
+  FraudTransactionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${ProjectName}-transactions-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: transactionId
+          AttributeType: S
+        - AttributeName: feedPartition
+          AttributeType: S
+        - AttributeName: feedTimestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: transactionId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: FeedIndex
+          KeySchema:
+            - AttributeName: feedPartition
+              KeyType: HASH
+            - AttributeName: feedTimestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+
+  # ── IAM Execution Role ──────────────────────────────────────
+  FraudLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-exec-${Stage}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: FraudDynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !GetAtt FraudTransactionsTable.Arn
+                  - !Sub "${FraudTransactionsTable.Arn}/index/*"
+        - PolicyName: FraudCloudWatchRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                Resource: "*"
+        - PolicyName: FraudStreamControl
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EventBridgeStreamRule
+                Effect: Allow
+                Action:
+                  - events:EnableRule
+                  - events:DisableRule
+                # Construct ARN without referencing FraudStreamRule to avoid circular dependency
+                Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/${ProjectName}-stream-rule-${Stage}"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ── HTTP API (API Gateway v2) ────────────────────────────────
+  FraudApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Stage
+      Description: !Sub "Fraud Risk Engine API — ${Stage}"
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref CorsAllowOrigin
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Requested-With
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        MaxAge: 600
+      Tags:
+        Project: !Ref ProjectName
+        Stage: !Ref Stage
+
+  # ── Lambda: POST /fraud/score ────────────────────────────────
+  FraudScoreFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/fraudScoreTransaction.ts
+    Properties:
+      FunctionName: !Sub "${ProjectName}-score-${Stage}"
+      CodeUri: ./
+      Handler: fraudScoreTransaction.handler
+      Role: !GetAtt FraudLambdaExecutionRole.Arn
+      Description: Score a transaction through the fraud risk engine and persist to DynamoDB
+      Events:
+        ScoreApi:
+          Type: HttpApi
+          Properties:
+            Path: /fraud/score
+            Method: POST
+            ApiId: !Ref FraudApi
+
+  FraudScoreLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FraudScoreFunction}"
+      RetentionInDays: 30
+
+  # ── Lambda: POST /fraud/simulate/{scenario} ──────────────────
+  FraudSimulateFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/fraudSimulateScenario.ts
+    Properties:
+      FunctionName: !Sub "${ProjectName}-simulate-${Stage}"
+      CodeUri: ./
+      Handler: fraudSimulateScenario.handler
+      Role: !GetAtt FraudLambdaExecutionRole.Arn
+      Timeout: 60
+      Description: Inject a synthetic SA fraud attack scenario batch
+      Events:
+        SimulateApi:
+          Type: HttpApi
+          Properties:
+            Path: /fraud/simulate/{scenario}
+            Method: POST
+            ApiId: !Ref FraudApi
+
+  FraudSimulateLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FraudSimulateFunction}"
+      RetentionInDays: 30
+
+  # ── Lambda: GET /fraud/feed ──────────────────────────────────
+  FraudGetFeedFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/fraudGetFeed.ts
+    Properties:
+      FunctionName: !Sub "${ProjectName}-get-feed-${Stage}"
+      CodeUri: ./
+      Handler: fraudGetFeed.handler
+      Role: !GetAtt FraudLambdaExecutionRole.Arn
+      Description: Return the latest scored SA transactions from the fraud feed (newest first)
+      Events:
+        GetFeedApi:
+          Type: HttpApi
+          Properties:
+            Path: /fraud/feed
+            Method: GET
+            ApiId: !Ref FraudApi
+
+  FraudGetFeedLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FraudGetFeedFunction}"
+      RetentionInDays: 30
+
+  # ── Lambda: GET /fraud/health ────────────────────────────────
+  FraudHealthFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/fraudHealth.ts
+    Properties:
+      FunctionName: !Sub "${ProjectName}-health-${Stage}"
+      CodeUri: ./
+      Handler: fraudHealth.handler
+      Role: !GetAtt FraudLambdaExecutionRole.Arn
+      Description: Lightweight health check endpoint
+      Events:
+        HealthApi:
+          Type: HttpApi
+          Properties:
+            Path: /fraud/health
+            Method: GET
+            ApiId: !Ref FraudApi
+
+  FraudHealthLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FraudHealthFunction}"
+      RetentionInDays: 30
+
+  # ── Lambda: POST /fraud/reset ────────────────────────────────
+  FraudResetFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/fraudReset.ts
+    Properties:
+      FunctionName: !Sub "${ProjectName}-reset-${Stage}"
+      CodeUri: ./
+      Handler: fraudReset.handler
+      Role: !GetAtt FraudLambdaExecutionRole.Arn
+      Timeout: 60
+      Description: Delete all transactions from the feed — demo reset
+      Events:
+        ResetApi:
+          Type: HttpApi
+          Properties:
+            Path: /fraud/reset
+            Method: POST
+            ApiId: !Ref FraudApi
+
+  FraudResetLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FraudResetFunction}"
+      RetentionInDays: 30
+
+  # ── Lambda: POST /fraud/stream/start ────────────────────────
+  FraudStreamStartFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/fraudStreamStart.ts
+    Properties:
+      FunctionName: !Sub "${ProjectName}-stream-start-${Stage}"
+      CodeUri: ./
+      Handler: fraudStreamStart.handler
+      Role: !GetAtt FraudLambdaExecutionRole.Arn
+      Description: Enable the EventBridge stream rule and record start time
+      Environment:
+        Variables:
+          STREAM_RULE_NAME: !Sub "${ProjectName}-stream-rule-${Stage}"
+      Events:
+        StreamStartApi:
+          Type: HttpApi
+          Properties:
+            Path: /fraud/stream/start
+            Method: POST
+            ApiId: !Ref FraudApi
+
+  FraudStreamStartLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FraudStreamStartFunction}"
+      RetentionInDays: 30
+
+  # ── Lambda: POST /fraud/stream/stop ─────────────────────────
+  FraudStreamStopFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/fraudStreamStop.ts
+    Properties:
+      FunctionName: !Sub "${ProjectName}-stream-stop-${Stage}"
+      CodeUri: ./
+      Handler: fraudStreamStop.handler
+      Role: !GetAtt FraudLambdaExecutionRole.Arn
+      Description: Disable the EventBridge stream rule and clear stream state
+      Environment:
+        Variables:
+          STREAM_RULE_NAME: !Sub "${ProjectName}-stream-rule-${Stage}"
+      Events:
+        StreamStopApi:
+          Type: HttpApi
+          Properties:
+            Path: /fraud/stream/stop
+            Method: POST
+            ApiId: !Ref FraudApi
+
+  FraudStreamStopLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FraudStreamStopFunction}"
+      RetentionInDays: 30
+
+  # ── Lambda: EventBridge tick — auto-generate SA transactions ─
+  FraudAutoGenerateFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/fraudAutoGenerate.ts
+    Properties:
+      FunctionName: !Sub "${ProjectName}-auto-generate-${Stage}"
+      CodeUri: ./
+      Handler: fraudAutoGenerate.handler
+      Role: !GetAtt FraudLambdaExecutionRole.Arn
+      Timeout: 60
+      Description: Generates ~3 realistic SA transactions per minute when stream is active; auto-stops after 10min
+      Environment:
+        Variables:
+          STREAM_RULE_NAME: !Sub "${ProjectName}-stream-rule-${Stage}"
+
+  FraudAutoGenerateLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FraudAutoGenerateFunction}"
+      RetentionInDays: 30
+
+  # ── Lambda: GET /fraud/system/metrics ───────────────────────
+  FraudSystemMetricsFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/fraudSystemMetrics.ts
+    Properties:
+      FunctionName: !Sub "${ProjectName}-system-metrics-${Stage}"
+      CodeUri: ./
+      Handler: fraudSystemMetrics.handler
+      Role: !GetAtt FraudLambdaExecutionRole.Arn
+      Description: Query CloudWatch for Lambda and DynamoDB observability metrics
+      Environment:
+        Variables:
+          LAMBDA_FUNCTION_NAMES: !Sub >-
+            ${ProjectName}-score-${Stage},${ProjectName}-simulate-${Stage},${ProjectName}-get-feed-${Stage},${ProjectName}-health-${Stage},${ProjectName}-reset-${Stage},${ProjectName}-stream-start-${Stage},${ProjectName}-stream-stop-${Stage},${ProjectName}-auto-generate-${Stage}
+      Events:
+        SystemMetricsApi:
+          Type: HttpApi
+          Properties:
+            Path: /fraud/system/metrics
+            Method: GET
+            ApiId: !Ref FraudApi
+
+  FraudSystemMetricsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FraudSystemMetricsFunction}"
+      RetentionInDays: 30
+
+  # ── EventBridge Rule — DISABLED by default ───────────────────
+  FraudStreamRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-stream-rule-${Stage}"
+      Description: "Fires every minute to generate realistic SA transactions. Enabled only while stream is active."
+      ScheduleExpression: "rate(1 minute)"
+      State: DISABLED
+      Targets:
+        - Arn: !GetAtt FraudAutoGenerateFunction.Arn
+          Id: FraudAutoGenerateTarget
+
+  FraudAutoGeneratePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt FraudAutoGenerateFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt FraudStreamRule.Arn
+
+Outputs:
+  ApiBaseUrl:
+    Description: "API Gateway base URL"
+    Value: !Sub "https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+    Export:
+      Name: !Sub "${ProjectName}-api-url-${Stage}"
+
+  ScoreEndpoint:
+    Description: "POST /fraud/score"
+    Value: !Sub "https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/fraud/score"
+
+  SimulateEndpoint:
+    Description: "POST /fraud/simulate/{scenario}"
+    Value: !Sub "https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/fraud/simulate/"
+
+  FeedEndpoint:
+    Description: "GET /fraud/feed"
+    Value: !Sub "https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/fraud/feed"
+
+  HealthEndpoint:
+    Description: "GET /fraud/health"
+    Value: !Sub "https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/fraud/health"
+
+  StreamStartEndpoint:
+    Description: "POST /fraud/stream/start"
+    Value: !Sub "https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/fraud/stream/start"
+
+  StreamStopEndpoint:
+    Description: "POST /fraud/stream/stop"
+    Value: !Sub "https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/fraud/stream/stop"
+
+  ResetEndpoint:
+    Description: "POST /fraud/reset"
+    Value: !Sub "https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/fraud/reset"
+
+  SystemMetricsEndpoint:
+    Description: "GET /fraud/system/metrics"
+    Value: !Sub "https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/fraud/system/metrics"
+
+  DynamoTableName:
+    Description: "DynamoDB table name"
+    Value: !Ref FraudTransactionsTable
+    Export:
+      Name: !Sub "${ProjectName}-table-${Stage}"
+
+  DynamoTableArn:
+    Description: "DynamoDB table ARN"
+    Value: !GetAtt FraudTransactionsTable.Arn
+
+  StreamRuleName:
+    Description: "EventBridge stream rule name"
+    Value: !Ref FraudStreamRule
+
+  StackName:
+    Description: "CloudFormation stack name"
+    Value: !Ref AWS::StackName

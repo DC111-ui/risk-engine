@@ -1,0 +1,33 @@
+# AWS SAM deployment configuration
+# Generated for: fraud-risk-engine
+# Owner: Darlington Chanakira
+#
+# Edit the [default.deploy.parameters] section before first deployment:
+#   1. Set region to your preferred AWS region
+#   2. Confirm stack_name matches your desired CloudFormation stack name
+#   3. Update CorsAllowOrigin when your frontend domain is live
+
+version = 0.1
+
+[default.global.parameters]
+stack_name = "fraud-risk-engine"
+region = "us-east-1"
+
+[default.build.parameters]
+cached     = true
+parallel   = true
+
+[default.validate.parameters]
+lint = true
+
+[default.deploy.parameters]
+capabilities        = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+confirm_changeset   = false
+resolve_s3          = true
+s3_prefix           = "fraud-risk-engine"
+region              = "us-east-1"
+parameter_overrides = "Stage=\"prod\" ProjectName=\"fraud-risk-engine\" CorsAllowOrigin=\"*\""
+
+# Uncomment and update once your portfolio domain is live:
+# parameter_overrides = "Stage=prod ProjectName=fraud-risk-engine CorsAllowOrigin=https://darlingtonchanakira.com"
+image_repositories = []

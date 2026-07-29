@@ -1,0 +1,47 @@
+{
+  "name": "risk-engine",
+  "version": "2.0.0",
+  "description": "AI Fraud Detection & Transaction Risk Engine — deterministic scoring engine with AWS Lambda + API Gateway + DynamoDB backend.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "demo": "ts-node demo.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "sam:build": "sam build",
+    "sam:deploy": "sam deploy",
+    "sam:deploy:guided": "sam deploy --guided",
+    "sam:local": "sam local start-api --env-vars env.local.json",
+    "sam:validate": "sam validate --lint",
+    "sam:logs:score": "sam logs --name FraudScoreFunction --tail",
+    "sam:logs:simulate": "sam logs --name FraudSimulateFunction --tail",
+    "sam:logs:feed": "sam logs --name FraudGetFeedFunction --tail"
+  },
+  "keywords": [
+    "fraud-detection",
+    "risk-engine",
+    "fintech",
+    "typescript",
+    "aws-lambda",
+    "dynamodb"
+  ],
+  "author": "Darlington Chanakira",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.1032.0",
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/client-eventbridge": "^3.1032.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.140",
+    "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^1.6.0",
+    "esbuild": "^0.21.5",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

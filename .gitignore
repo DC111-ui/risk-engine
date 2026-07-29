@@ -1,0 +1,31 @@
+# Build output
+dist/
+.aws-sam/
+
+# Separate project with its own repo (DC111-ui/fraud-engine)
+fraud-engine/
+
+# Dependencies
+node_modules/
+
+# Environment / secrets
+.env
+.env.local
+*.env
+
+# Test coverage
+coverage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+.idea/
+
+# AWS SAM local cache
+.aws/
+
+# Logs
+*.log
