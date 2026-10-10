@@ -23,7 +23,11 @@ lint = true
 [default.deploy.parameters]
 capabilities        = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
 confirm_changeset   = false
-resolve_s3          = true
+# Westerwick-Production (749939211165): shared artifacts bucket + scoped CloudFormation
+# exec role from the westerwick-cicd-foundation stack. CI deploys with these too.
+s3_bucket           = "westerwick-cicd-artifacts-749939211165-us-east-1"
+role_arn            = "arn:aws:iam::749939211165:role/westerwick-cfn-exec-workloads"
+no_fail_on_empty_changeset = true
 s3_prefix           = "fraud-risk-engine"
 region              = "us-east-1"
 parameter_overrides = "Stage=\"prod\" ProjectName=\"fraud-risk-engine\" CorsAllowOrigin=\"*\""
